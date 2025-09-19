@@ -1,0 +1,238 @@
+//===================================================================
+// uvm_tb/test_top.sv (Top-level + DUT + Clock)
+//===================================================================
+`include "uvm_macros.svh"
+import uvm_pkg::*;
+import test_pkg::*;
+
+module test_top;
+    logic clk = 0;
+    always #5 clk = ~clk;
+
+    dut_if #(.WIDTH(1)) ha_if(clk);
+
+    half_adder #(.WIDTH(1)) dut (
+        .a(ha_if.a), .b(ha_if.b),
+        .sum(ha_if.sum), .carry(ha_if.carry)
+    );
+
+    initial begin
+        uvm_config_db#(virtual dut_if)::set(null, "*", "vif", ha_if);
+        run_test("ha_test");
+    end
+endmodule
+
+//===================================================================
+// uvm_tb/dut_if.sv (Interface)
+//===================================================================
+interface dut_if #(parameter WIDTH = 1)(input logic clk);
+    logic [WIDTH-1:0] a, b, sum, carry;
+endinterface
+
+//===================================================================
+// uvm_tb/test_pkg.sv (Package + Includes)
+//===================================================================
+package test_pkg;
+    import uvm_pkg::*;
+    `include "uvm_macros.svh"
+
+    `include "ha_sequence.sv"
+    `include "ha_driver.sv"
+    `include "ha_monitor.sv"
+    `include "ha_scoreboard.sv"
+    `include "ha_agent.sv"
+    `include "ha_env.sv"
+    `include "ha_test.sv"
+endpackage
+
+//===================================================================
+// uvm_tb/ha_sequence.sv
+//===================================================================
+class ha_sequence extends uvm_sequence#(uvm_sequence_item);
+    rand bit a, b;
+    `uvm_object_utils(ha_sequence)
+
+    function new(string name = "ha_sequence");
+        super.new(name);
+    endfunction
+
+    task body();
+        for (int i = 0; i < 5; i++) begin
+            a = $urandom_range(0,1);
+            b = $urandom_range(0,1);
+            ha_item ha = ha_item::type_id::create("ha");
+            ha.a = a;
+            ha.b = b;
+            start_item(ha);
+            finish_item(ha);
+        end
+    endtask
+endclass
+
+//===================================================================
+// uvm_tb/ha_driver.sv
+//===================================================================
+class ha_driver extends uvm_driver #(ha_item);
+    `uvm_component_utils(ha_driver)
+    virtual dut_if vif;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        super.build_phase(phase);
+        if (!uvm_config_db#(virtual dut_if)::get(this, "", "vif", vif))
+            `uvm_fatal("NOVIF", "Virtual interface not set")
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        forever begin
+            ha_item ha;
+            seq_item_port.get_next_item(ha);
+            vif.a = ha.a;
+            vif.b = ha.b;
+            #10;
+            seq_item_port.item_done();
+        end
+    endtask
+endclass
+
+//===================================================================
+// uvm_tb/ha_monitor.sv
+//===================================================================
+class ha_monitor extends uvm_monitor;
+    `uvm_component_utils(ha_monitor)
+    virtual dut_if vif;
+    uvm_analysis_port #(ha_item) ap;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        ap = new("ap", this);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        if (!uvm_config_db#(virtual dut_if)::get(this, "", "vif", vif))
+            `uvm_fatal("NOVIF", "Virtual interface not set")
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        forever begin
+            ha_item ha = ha_item::type_id::create("ha");
+            ha.a = vif.a;
+            ha.b = vif.b;
+            ha.sum = vif.sum;
+            ha.carry = vif.carry;
+            ap.write(ha);
+            #10;
+        end
+    endtask
+endclass
+
+//===================================================================
+// uvm_tb/ha_scoreboard.sv
+//===================================================================
+class ha_scoreboard extends uvm_scoreboard;
+    `uvm_component_utils(ha_scoreboard)
+    uvm_analysis_imp #(ha_item, ha_scoreboard) analysis_export;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+        analysis_export = new("analysis_export", this);
+    endfunction
+
+    function void write(ha_item ha);
+        bit expected_sum = ha.a ^ ha.b;
+        bit expected_carry = ha.a & ha.b;
+        if (ha.sum !== expected_sum || ha.carry !== expected_carry)
+            `uvm_error("Mismatch", $sformatf("a=%0b b=%0b sum=%0b (exp=%0b) carry=%0b (exp=%0b)",
+                        ha.a, ha.b, ha.sum, expected_sum, ha.carry, expected_carry))
+        else
+            `uvm_info("Match", "Half adder output correct", UVM_LOW)
+    endfunction
+endclass
+
+//===================================================================
+// uvm_tb/ha_agent.sv
+//===================================================================
+class ha_agent extends uvm_agent;
+    `uvm_component_utils(ha_agent)
+    ha_driver driver;
+    ha_monitor monitor;
+    ha_sequencer sequencer;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        driver = ha_driver::type_id::create("driver", this);
+        monitor = ha_monitor::type_id::create("monitor", this);
+        sequencer = ha_sequencer::type_id::create("sequencer", this);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        driver.seq_item_port.connect(sequencer.seq_item_export);
+    endfunction
+endclass
+
+//===================================================================
+// uvm_tb/ha_env.sv
+//===================================================================
+class ha_env extends uvm_env;
+    `uvm_component_utils(ha_env)
+    ha_agent agent;
+    ha_scoreboard scoreboard;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        agent = ha_agent::type_id::create("agent", this);
+        scoreboard = ha_scoreboard::type_id::create("scoreboard", this);
+    endfunction
+
+    function void connect_phase(uvm_phase phase);
+        agent.monitor.ap.connect(scoreboard.analysis_export);
+    endfunction
+endclass
+
+//===================================================================
+// uvm_tb/ha_test.sv
+//===================================================================
+class ha_test extends uvm_test;
+    `uvm_component_utils(ha_test)
+    ha_env env;
+
+    function new(string name, uvm_component parent);
+        super.new(name, parent);
+    endfunction
+
+    function void build_phase(uvm_phase phase);
+        env = ha_env::type_id::create("env", this);
+    endfunction
+
+    task run_phase(uvm_phase phase);
+        ha_sequence seq = ha_sequence::type_id::create("seq");
+        seq.start(env.agent.sequencer);
+    endtask
+endclass
+
+//===================================================================
+// uvm_tb/ha_item.sv (Sequence Item)
+//===================================================================
+class ha_item extends uvm_sequence_item;
+    rand bit a, b;
+    bit sum, carry;
+
+    `uvm_object_utils(ha_item)
+
+    function new(string name = "ha_item");
+        super.new(name);
+    endfunction
+
+    function string convert2string();
+        return $sformatf("a=%0b b=%0b sum=%0b carry=%0b", a, b, sum, carry);
+    endfunction
+endclass
